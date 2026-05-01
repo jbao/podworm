@@ -8,7 +8,10 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 import click
+from dotenv import load_dotenv
 from rich.console import Console
+
+load_dotenv()
 from rich.table import Table
 
 from podworm.config import get_interviews_dir, get_transcripts_dir
