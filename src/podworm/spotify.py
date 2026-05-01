@@ -37,6 +37,7 @@ def _get_auth_manager() -> SpotifyOAuth:
         redirect_uri=SPOTIFY_REDIRECT_URI,
         scope=SPOTIFY_SCOPE,
         cache_path=str(get_spotify_cache_path()),
+        open_browser=False,
     )
 
 
