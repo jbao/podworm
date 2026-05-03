@@ -761,6 +761,86 @@ def reset(yes: bool):
     console.print(f"\n[green]Reset complete.[/green]")
 
 
+@cli.command("reset-day")
+@click.option("--date", "-d", "date_str", default=None,
+              help="Date to clean (YYYY-MM-DD, default: today)")
+@click.option("--yes", "-y", is_flag=True, help="Skip confirmation prompt")
+def reset_day(date_str: str | None, yes: bool):
+    """Delete one day's episodes (DB rows, files, Spotify mappings)."""
+    from datetime import date as date_type
+
+    if date_str:
+        try:
+            target = date_type.fromisoformat(date_str)
+        except ValueError:
+            console.print(f"[red]Invalid date format:[/red] {date_str} (expected YYYY-MM-DD)")
+            sys.exit(1)
+    else:
+        target = date_type.today()
+
+    db = Database()
+    targets = [
+        e for e in db.list_episodes()
+        if e.downloaded_at and e.downloaded_at.date() == target
+    ]
+
+    if not targets:
+        console.print(f"[dim]No episodes found for {target.isoformat()}.[/dim]")
+        return
+
+    files_to_delete: list[Path] = []
+    for ep in targets:
+        for attr in ("transcript_path", "digest_path", "audio_path"):
+            p = getattr(ep, attr, None)
+            if p:
+                files_to_delete.append(Path(p))
+
+    mapping_count = db.db["metadata"].count_where(
+        "key LIKE 'spotify:%' AND value IN ({})".format(
+            ",".join("?" for _ in targets)
+        ),
+        [ep.id for ep in targets],
+    ) if targets else 0
+
+    console.print(f"[bold red]This will delete for {target.isoformat()}:[/bold red]")
+    console.print(f"  - {len(targets)} episode row(s)")
+    for ep in targets:
+        console.print(f"    • {ep.title[:70]}")
+    console.print(f"  - {len(files_to_delete)} file(s) on disk")
+    console.print(f"  - {mapping_count} Spotify mapping(s)")
+
+    if not yes:
+        click.confirm("\nAre you sure?", abort=True)
+
+    deleted_files = 0
+    for path in files_to_delete:
+        try:
+            path.unlink(missing_ok=True)
+            deleted_files += 1
+        except OSError as e:
+            console.print(f"  [red]✗[/red] {path}: {e}")
+
+    deleted_mappings = 0
+    deleted_episodes = 0
+    for ep in targets:
+        before = db.db["metadata"].count_where(
+            "key LIKE 'spotify:%' AND value = ?", [ep.id]
+        )
+        db.db["metadata"].delete_where(
+            "key LIKE 'spotify:%' AND value = ?", [ep.id]
+        )
+        deleted_mappings += before
+        db.db["episodes"].delete_where("id = ?", [ep.id])
+        deleted_episodes += 1
+
+    db.db.conn.commit()
+
+    console.print(
+        f"\n[green]Deleted {deleted_episodes} episode(s), "
+        f"{deleted_files} file(s), {deleted_mappings} Spotify mapping(s).[/green]"
+    )
+
+
 @cli.command()
 @click.option("--dry-run", is_flag=True, help="Show what would be deleted without deleting")
 @click.option("--podcast", "-p", help="Limit to a specific podcast ID prefix")
@@ -1097,7 +1177,6 @@ def daily(limit: int, date_str: str | None, skip_clean: bool, no_chat: bool, obs
     )
 
     if obsidian:
-        console.print("\n[bold]Generating summary via claude --print...[/bold]")
         summary = _claude_print(instruction, "\n---\n\n".join(parts))
         if summary:
             note_path = _save_obsidian_note(summary, date_filter)
@@ -1404,12 +1483,16 @@ def _claude_print(instruction: str, transcripts: str) -> str | None:
     tmp.write(transcripts)
     tmp.close()
     try:
-        result = subprocess.run(
-            ["claude", "--print", "--append-system-prompt-file", tmp.name, instruction],
-            capture_output=True,
-            text=True,
-            timeout=600,
-        )
+        with console.status(
+            "Generating summary via claude --print…", spinner="dots"
+        ):
+            result = subprocess.run(
+                ["claude", "--print", "--append-system-prompt-file", tmp.name,
+                 instruction],
+                capture_output=True,
+                text=True,
+                timeout=600,
+            )
         if result.returncode == 0 and result.stdout.strip():
             return result.stdout.strip()
         if result.stderr:
@@ -1428,7 +1511,7 @@ def _claude_print(instruction: str, transcripts: str) -> str | None:
         os.unlink(tmp.name)
 
 
-def _save_obsidian_note(summary: str, date: "date") -> Path:
+def _save_obsidian_note(summary: str, date) -> Path:
     """Save a summary as an Obsidian note and return the file path."""
     from podworm.config import get_obsidian_vault_dir
 
